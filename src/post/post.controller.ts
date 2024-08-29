@@ -30,7 +30,7 @@ export class PostController {
   @UseInterceptors(FileUpload('image'))
   @UseGuards(JwtGuard)
   public createPost(
-    @User('id') userId: string,
+    @User('id') userId: number,
     @Body() body: CreatePostDTO,
     @UploadedFile()
     image?: Express.Multer.File | null,
@@ -42,7 +42,7 @@ export class PostController {
   @UseInterceptors(FileUpload('image'))
   @UseGuards(JwtGuard)
   public updatePost(
-    @User('id') userId: string,
+    @User('id') userId: number,
     @Param('id')
     postId: string,
     @UploadedFile()

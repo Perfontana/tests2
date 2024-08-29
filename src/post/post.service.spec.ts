@@ -1,14 +1,25 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { PostService } from './post.service';
 import { getModelToken } from '@nestjs/sequelize';
+import { WinstonModule } from 'nest-winston';
+import * as winston from 'winston';
+
+import { PostService } from './post.service';
 import { Post } from './post.model';
 import { postMock } from './mocks/post.mock';
+import { PassThrough } from 'stream';
 
 describe('PostService', () => {
   let service: PostService;
+  const logStream = new PassThrough();
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
+      imports: [
+        WinstonModule.forRoot({
+          // Stream transport is used, since File transport flushes logs inconsistently
+          transports: [new winston.transports.Stream({ stream: logStream })],
+        }),
+      ],
       providers: [
         PostService,
         { provide: getModelToken(Post), useValue: postMock },
@@ -32,7 +43,7 @@ describe('PostService', () => {
   });
 
   it('should create a post', async () => {
-    const authorId = 'userId';
+    const authorId = 1;
 
     const file = {
       filename: 'filename',
@@ -53,7 +64,7 @@ describe('PostService', () => {
 
   describe('Post updates', () => {
     it('should return error if post is not found', async () => {
-      const authorId = 'userId';
+      const authorId = 1;
 
       const body = {
         text: 'text',
@@ -67,7 +78,14 @@ describe('PostService', () => {
     });
 
     it('should return error if user is not the author', async () => {
-      const authorId = 'wrong_user_id';
+      const authorId = 0;
+
+      const originalPost = postMock.create({
+        text: 'original',
+        title: 'original',
+        tags: 'original',
+        authorId: 1,
+      });
 
       const body = {
         text: 'text',
@@ -75,11 +93,24 @@ describe('PostService', () => {
         tags: 'tag',
       };
 
-      await expect(service.updatePost('1', body, authorId)).rejects.toThrow();
+      let log;
+      const setLog = (data) => {
+        log = data?.toString();
+      };
+
+      logStream.on('data', setLog);
+
+      await expect(
+        service.updatePost(originalPost.id, body, authorId),
+      ).rejects.toThrow();
+
+      expect(log).toMatch(`User ${authorId} tried to update post 1`);
+
+      logStream.off('data', setLog);
     });
 
     it('should add image filename to post.image field', async () => {
-      const authorId = '1';
+      const authorId = 1;
 
       const originalPost = postMock.create({
         text: 'original',

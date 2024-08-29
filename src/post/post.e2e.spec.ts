@@ -1,39 +1,91 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import * as request from 'supertest';
-import { getModelToken } from '@nestjs/sequelize';
+import { SequelizeModule } from '@nestjs/sequelize';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 
 import { Post } from './post.model';
-import { postMock } from './mocks/post.mock';
+import { User } from '../user/user.model';
 import { PostModule } from './post.module';
 import { AuthModule } from '../auth/auth.module';
-import { User } from '../user/user.model';
-import { userMock } from '../auth/mocks/user.mock';
 import { mockConfig } from '../testing/mock-config';
+import { Sequelize } from 'sequelize-typescript';
+import { WinstonModule } from 'nest-winston';
+import * as winston from 'winston';
+import { join } from 'path';
+import { rm } from 'fs/promises';
+
+const TEST_USER_EMAIL = 'TEST_USER_EMAIL@mail.com';
+const TEST_USER_PASSWORD = 'USER_PASSWORD';
+let testUserId: number;
+
+let connection: Sequelize;
+let server;
+
+async function resetDatabase(connection: Sequelize): Promise<void> {
+  await connection.sync({ force: true, match: /_test$/ });
+
+  const user1 = await User.create({
+    email: TEST_USER_EMAIL,
+    username: 'user1',
+    password: TEST_USER_PASSWORD,
+  });
+
+  testUserId = user1.id;
+
+  const user2 = await User.create({
+    email: 'user2@mail.com',
+    username: 'user2',
+    password: TEST_USER_PASSWORD,
+  });
+
+  await Post.bulkCreate([
+    {
+      title: 'post1',
+      text: 'post1',
+      authorId: user1.id,
+      tags: 'post1',
+    },
+    {
+      title: 'post2',
+      text: 'post2',
+      authorId: user2.id,
+      tags: 'post2',
+    },
+  ]);
+}
 
 describe('PostController (e2e)', () => {
   let app: INestApplication;
   let token: string;
-  let user: { id: number };
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [
         ConfigModule.forRoot({ isGlobal: true }),
+        SequelizeModule.forRootAsync({
+          inject: [ConfigService],
+          useFactory: (configService: ConfigService) => ({
+            uri: configService.get('DATABASE_URL'),
+            models: [User, Post],
+            logging: false,
+          }),
+        }),
+        WinstonModule.forRootAsync({
+          inject: [ConfigService],
+          useFactory: (configService: ConfigService) => ({
+            transports: [
+              new winston.transports.File({
+                dirname: join(__dirname, configService.get('LOG_DIRNAME')),
+                filename: configService.get('LOG_FILENAME'),
+              }),
+            ],
+          }),
+        }),
         PostModule,
         AuthModule,
       ],
     })
-      // Since real DB is not used, *Repository has to be overriden to resolve NestJS dependencies
-      .overrideProvider('PostRepository')
-      .useValue({})
-      .overrideProvider('UserRepository')
-      .useValue({})
-      .overrideProvider(getModelToken(Post))
-      .useValue(postMock)
-      .overrideProvider(getModelToken(User))
-      .useValue(userMock)
       .overrideProvider(ConfigService)
       .useValue(mockConfig)
       .compile();
@@ -44,27 +96,36 @@ describe('PostController (e2e)', () => {
 
     await app.init();
 
-    const response = await request(app.getHttpServer())
-      .post('/auth/register')
-      .send({ username: 'test', email: 'test@example.com', password: 'test' });
+    connection = app.get(Sequelize);
+    server = app.getHttpServer();
+
+    await resetDatabase(connection);
+
+    const response = await request(server)
+      .post('/auth/login')
+      .send({ email: TEST_USER_EMAIL, password: TEST_USER_PASSWORD });
 
     token = response.body.access_token;
-    user = userMock.findOne({ where: { username: 'test' } });
   });
 
   afterAll(async () => {
     await app.close();
+    await rm(join(__dirname, mockConfig.get('LOG_DIRNAME')), {
+      recursive: true,
+    });
   });
 
-  afterEach(() => jest.clearAllMocks());
+  afterEach(async () => {
+    jest.clearAllMocks();
+    await resetDatabase(connection);
+  });
 
-  it('/posts GET', () => {
-    return request(app.getHttpServer())
+  it('/posts GET', async () => {
+    const response = await request(app.getHttpServer())
       .get('/posts')
-      .expect(200)
-      .expect((res) => {
-        expect(res.body).toBeInstanceOf(Array);
-      });
+      .expect(200);
+
+    expect(response.body).toBeInstanceOf(Array);
   });
 
   describe('/posts POST', () => {
@@ -74,16 +135,15 @@ describe('PostController (e2e)', () => {
         text: 'This is a test post.',
       };
 
-      return request(app.getHttpServer())
+      const response = await request(app.getHttpServer())
         .post('/posts')
         .set('Authorization', `Bearer ${token}`)
         .send(createPostDto)
-        .expect(201)
-        .expect((res) => {
-          expect(res.body).toHaveProperty('authorId');
-          expect(res.body.authorId).toEqual(user.id);
-          expect(res.body.title).toEqual(createPostDto.title);
-        });
+        .expect(201);
+
+      expect(response.body).toHaveProperty('authorId');
+      expect(response.body.authorId).toEqual(testUserId);
+      expect(response.body.title).toEqual(createPostDto.title);
     });
 
     it('should reject unauthorized', async () => {
@@ -103,51 +163,49 @@ describe('PostController (e2e)', () => {
         text: 'This is a test post.',
       };
 
-      return request(app.getHttpServer())
+      const response = await request(app.getHttpServer())
         .post('/posts')
         .set('Authorization', `Bearer ${token}`)
         .send(createPostDto)
-        .expect(400)
-        .expect((res) => {
-          expect(res.body.message).toBeInstanceOf(Array);
-        });
+        .expect(400);
+
+      expect(response.body.message).toBeInstanceOf(Array);
     });
   });
 
   describe('/posts/:id PATCH', () => {
-    it('should update post', () => {
+    it('should update post', async () => {
       const updatePostDto = {
         title: 'Updated Test Post',
         text: 'This is an updated test post.',
       };
 
-      const existingPost = postMock.create({
+      const existingPost = await Post.create({
         title: 'initial',
         text: 'initial',
-        authorId: user.id,
+        authorId: testUserId,
       });
 
-      return request(app.getHttpServer())
+      const response = await request(app.getHttpServer())
         .patch(`/posts/${existingPost.id}`)
         .set('Authorization', `Bearer ${token}`)
         .send(updatePostDto)
-        .expect(200)
-        .expect((res) => {
-          expect(res.body).toHaveProperty('id', existingPost.id);
-          expect(res.body.title).toEqual(updatePostDto.title);
-        });
+        .expect(200);
+
+      expect(response.body).toHaveProperty('id', existingPost.id);
+      expect(response.body.title).toEqual(updatePostDto.title);
     });
 
-    it('should reject updates from other author', () => {
+    it('should reject updates from other author', async () => {
       const updatePostDto = {
         title: 'Updated Test Post',
         text: 'This is an updated test post.',
       };
 
-      const existingPost = postMock.create({
+      const existingPost = await Post.create({
         title: 'initial',
         text: 'initial',
-        authorId: 'not_the_user',
+        authorId: testUserId + 1,
       });
 
       return request(app.getHttpServer())

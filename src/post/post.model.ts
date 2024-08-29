@@ -36,8 +36,8 @@ export class Post extends Model {
   image: string;
 
   @ForeignKey(() => User)
-  @Column({ type: DataTypes.STRING })
-  authorId: string;
+  @Column({ type: DataTypes.INTEGER })
+  authorId: number;
 
   @BelongsTo(() => User)
   author: User;
