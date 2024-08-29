@@ -144,6 +144,10 @@ describe('PostController (e2e)', () => {
       expect(response.body).toHaveProperty('authorId');
       expect(response.body.authorId).toEqual(testUserId);
       expect(response.body.title).toEqual(createPostDto.title);
+
+      const dbPost = await Post.findOne({where: {id: response.body.id}})
+
+      expect(dbPost).toBeDefined()
     });
 
     it('should reject unauthorized', async () => {
@@ -194,6 +198,13 @@ describe('PostController (e2e)', () => {
 
       expect(response.body).toHaveProperty('id', existingPost.id);
       expect(response.body.title).toEqual(updatePostDto.title);
+      expect(response.body.text).toEqual(updatePostDto.text);
+
+      const dbPost = await Post.findOne({where: {id: response.body.id}})
+
+      expect(dbPost).toBeDefined()
+      expect(dbPost.title).toEqual(updatePostDto.title);
+      expect(dbPost.text).toEqual(updatePostDto.text);
     });
 
     it('should reject updates from other author', async () => {
